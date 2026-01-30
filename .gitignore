@@ -1,0 +1,19 @@
+# Training data (contains personal messages)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.env
+
+# Config with secrets
+config.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
