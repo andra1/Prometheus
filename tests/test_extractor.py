@@ -19,6 +19,12 @@ from src.extractor.chat_db import (
 )
 
 
+def datetime_to_apple_time(dt: datetime) -> int:
+    """Convert Python datetime to Apple's nanosecond timestamp format."""
+    seconds_since_apple_epoch = dt.timestamp() - APPLE_EPOCH.timestamp()
+    return int(seconds_since_apple_epoch * NANOSECONDS_PER_SECOND)
+
+
 class TestMessageDataclass:
     """Tests for the Message dataclass."""
 
@@ -778,3 +784,125 @@ class TestEdgeCases:
             assert len(messages[0].attachment_types) == 2
             assert 'image/jpeg' in messages[0].attachment_types
             assert 'image/png' in messages[0].attachment_types
+
+    def test_sms_messages_processed(self, mock_chat_db):
+        """Test that SMS messages (not iMessage) are processed correctly."""
+        conn = sqlite3.connect(mock_chat_db)
+        cursor = conn.cursor()
+
+        # Create handles with different services - SMS vs iMessage
+        cursor.execute("INSERT INTO handle VALUES (1, '+15551234567', 'SMS')")
+        cursor.execute("INSERT INTO handle VALUES (2, '+15559876543', 'iMessage')")
+
+        # Create chats for both
+        cursor.execute("INSERT INTO chat VALUES (1, '+15551234567', 'SMS Contact', NULL)")
+        cursor.execute("INSERT INTO chat VALUES (2, '+15559876543', 'iMessage Contact', NULL)")
+
+        cursor.execute("INSERT INTO chat_handle_join VALUES (1, 1)")
+        cursor.execute("INSERT INTO chat_handle_join VALUES (2, 2)")
+
+        # Insert SMS message with proper Apple timestamp
+        sms_time = datetime_to_apple_time(datetime(2024, 1, 15, 10, 0, 0))
+        cursor.execute(
+            "INSERT INTO message VALUES (1, 'This is an SMS', ?, 0, 1, 0)",
+            (sms_time,)
+        )
+        cursor.execute("INSERT INTO chat_message_join VALUES (1, 1)")
+
+        # Insert iMessage with proper Apple timestamp
+        imsg_time = datetime_to_apple_time(datetime(2024, 1, 15, 11, 0, 0))
+        cursor.execute(
+            "INSERT INTO message VALUES (2, 'This is an iMessage', ?, 0, 2, 0)",
+            (imsg_time,)
+        )
+        cursor.execute("INSERT INTO chat_message_join VALUES (2, 2)")
+
+        conn.commit()
+        conn.close()
+
+        with MessageExtractor(mock_chat_db) as extractor:
+            # Both SMS and iMessage should be extracted
+            messages = extractor.get_messages()
+            assert len(messages) == 2
+
+            # Verify both message types are present
+            texts = [m.text for m in messages]
+            assert 'This is an SMS' in texts
+            assert 'This is an iMessage' in texts
+
+            # Verify handles are correctly associated
+            sms_msg = next(m for m in messages if m.text == 'This is an SMS')
+            imsg_msg = next(m for m in messages if m.text == 'This is an iMessage')
+
+            assert sms_msg.handle == '+15551234567'
+            assert imsg_msg.handle == '+15559876543'
+
+    def test_mixed_sms_imessage_same_contact(self, mock_chat_db):
+        """Test conversation with same contact via both SMS and iMessage.
+
+        In real chat.db, the same phone number with different services gets
+        different handle identifiers (e.g., '+1555...' for SMS, 'p:+1555...' for iMessage).
+        """
+        conn = sqlite3.connect(mock_chat_db)
+        cursor = conn.cursor()
+
+        # Same phone but different service identifiers (realistic format)
+        cursor.execute("INSERT INTO handle VALUES (1, '+15551234567', 'SMS')")
+        cursor.execute("INSERT INTO handle VALUES (2, 'p:+15551234567', 'iMessage')")
+
+        # Single chat can have messages from both services
+        cursor.execute("INSERT INTO chat VALUES (1, '+15551234567', 'Mixed Contact', NULL)")
+        cursor.execute("INSERT INTO chat_handle_join VALUES (1, 1)")
+        cursor.execute("INSERT INTO chat_handle_join VALUES (1, 2)")
+
+        # Messages alternating between SMS and iMessage (common when service switches)
+        times = [
+            datetime_to_apple_time(datetime(2024, 1, 15, 10, 0, 0)),
+            datetime_to_apple_time(datetime(2024, 1, 15, 10, 1, 0)),
+            datetime_to_apple_time(datetime(2024, 1, 15, 10, 2, 0)),
+            datetime_to_apple_time(datetime(2024, 1, 15, 10, 3, 0)),
+        ]
+
+        cursor.execute(
+            "INSERT INTO message VALUES (1, 'SMS when no data', ?, 0, 1, 0)", (times[0],)
+        )
+        cursor.execute(
+            "INSERT INTO message VALUES (2, 'Reply via SMS', ?, 1, 1, 0)", (times[1],)
+        )
+        cursor.execute(
+            "INSERT INTO message VALUES (3, 'Now on iMessage', ?, 0, 2, 0)", (times[2],)
+        )
+        cursor.execute(
+            "INSERT INTO message VALUES (4, 'iMessage reply', ?, 1, 2, 0)", (times[3],)
+        )
+
+        cursor.execute("INSERT INTO chat_message_join VALUES (1, 1)")
+        cursor.execute("INSERT INTO chat_message_join VALUES (1, 2)")
+        cursor.execute("INSERT INTO chat_message_join VALUES (1, 3)")
+        cursor.execute("INSERT INTO chat_message_join VALUES (1, 4)")
+
+        conn.commit()
+        conn.close()
+
+        with MessageExtractor(mock_chat_db) as extractor:
+            # All messages should be in the same conversation
+            conversations = extractor.get_conversations_with_messages()
+            assert len(conversations) == 1
+
+            conv = conversations[0]
+            assert len(conv.messages) == 4
+            assert conv.display_name == 'Mixed Contact'
+
+            # Verify message order is preserved (chronological)
+            assert conv.messages[0].text == 'SMS when no data'
+            assert conv.messages[3].text == 'iMessage reply'
+
+            # Verify is_from_me is correct
+            assert conv.messages[0].is_from_me is False
+            assert conv.messages[1].is_from_me is True
+            assert conv.messages[2].is_from_me is False
+            assert conv.messages[3].is_from_me is True
+
+            # Verify handles show the service transition
+            assert conv.messages[0].handle == '+15551234567'  # SMS
+            assert conv.messages[2].handle == 'p:+15551234567'  # iMessage
