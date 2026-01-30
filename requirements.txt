@@ -1,0 +1,6 @@
+# Prometheus - Personal iMessage Bot
+
+# Core dependencies (extractor uses stdlib only)
+# Future phases will add:
+# anthropic>=0.18.0  # Claude API
+# pyyaml>=6.0        # Configuration
