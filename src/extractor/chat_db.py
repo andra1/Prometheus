@@ -442,7 +442,7 @@ def main():
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 1
-    except sqlite3.OperationalError as e:
+    except sqlite3.Error as e:
         print(f"Database error: {e}")
         print("You may need to grant Full Disk Access to your terminal app in System Preferences.")
         return 1
